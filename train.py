@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+# 导入必要的库和模块
 import os
 import torch
 from random import randint
@@ -22,47 +23,58 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+
+# 尝试导入TensorBoard，如果导入失败则设置TENSORBOARD_FOUND为False
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
 
+# 尝试导入fused_ssim，如果导入失败则设置FUSED_SSIM_AVAILABLE为False
 try:
     from fused_ssim import fused_ssim
     FUSED_SSIM_AVAILABLE = True
 except:
     FUSED_SSIM_AVAILABLE = False
 
+# 尝试导入SparseGaussianAdam，如果导入失败则设置SPARSE_ADAM_AVAILABLE为False
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
 
+# 定义训练函数
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
+    # 如果选择了稀疏Adam优化器但未安装相应的库，则退出程序
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
+    # 初始化一些变量
     first_iter = 0
-    tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
-    scene = Scene(dataset, gaussians)
-    gaussians.training_setup(opt)
+    tb_writer = prepare_output_and_logger(dataset)  # 准备输出和日志记录器
+    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)  # 创建高斯模型
+    scene = Scene(dataset, gaussians)  # 创建场景
+    gaussians.training_setup(opt)  # 设置高斯模型的训练参数
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
-        gaussians.restore(model_params, opt)
+        (model_params, first_iter) = torch.load(checkpoint)  # 加载检查点
+        gaussians.restore(model_params, opt)  # 恢复模型参数
 
+    # 设置背景颜色
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    iter_start = torch.cuda.Event(enable_timing = True)
-    iter_end = torch.cuda.Event(enable_timing = True)
+    # 创建CUDA事件用于计时
+    iter_start = torch.cuda.Event(enable_timing=True)
+    iter_end = torch.cuda.Event(enable_timing=True)
 
+    # 检查是否使用稀疏Adam优化器
     use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
-    depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations)
+    depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations)  # 获取深度L1权重的指数学习率函数
 
+    # 获取训练相机的视点堆栈和索引
     viewpoint_stack = scene.getTrainCameras().copy()
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
@@ -90,11 +102,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         gaussians.update_learning_rate(iteration)
 
-        # Every 1000 its we increase the levels of SH up to a maximum degree
+        # 每1000次迭代增加一次SH的级别，直到达到最大程度
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
-        # Pick a random Camera
+        # 随机选择一个相机视点
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
             viewpoint_indices = list(range(len(viewpoint_stack)))
@@ -102,7 +114,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         viewpoint_cam = viewpoint_stack.pop(rand_idx)
         vind = viewpoint_indices.pop(rand_idx)
 
-        # Render
+        # 渲染
         if (iteration - 1) == debug_from:
             pipe.debug = True
 
@@ -115,7 +127,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             alpha_mask = viewpoint_cam.alpha_mask.cuda()
             image *= alpha_mask
 
-        # Loss
+        # 计算损失
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         if FUSED_SSIM_AVAILABLE:
@@ -125,7 +137,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
-        # Depth regularization
+        # 深度正则化
         Ll1depth_pure = 0.0
         if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
             invDepth = render_pkg["depth"]
@@ -173,7 +185,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 
-            # Optimizer step
+            # 更新优化器
             if iteration < opt.iterations:
                 gaussians.exposure_optimizer.step()
                 gaussians.exposure_optimizer.zero_grad(set_to_none = True)
@@ -185,25 +197,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
 
-            if (iteration in checkpoint_iterations):
+            # 保存检查点
+            if iteration in checkpoint_iterations:
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
+# 准备输出和日志记录器
 def prepare_output_and_logger(args):    
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
-            unique_str=os.getenv('OAR_JOB_ID')
+            unique_str = os.getenv('OAR_JOB_ID')
         else:
             unique_str = str(uuid.uuid4())
         args.model_path = os.path.join("./output/", unique_str[0:10])
         
-    # Set up output folder
+    # 设置输出文件夹
     print("Output folder: {}".format(args.model_path))
-    os.makedirs(args.model_path, exist_ok = True)
+    os.makedirs(args.model_path, exist_ok=True)
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
-    # Create Tensorboard writer
+    # 创建TensorBoard记录器
     tb_writer = None
     if TENSORBOARD_FOUND:
         tb_writer = SummaryWriter(args.model_path)
@@ -211,13 +225,14 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, train_test_exp):
+# 训练报告
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene: Scene, renderFunc, renderArgs, train_test_exp):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
         tb_writer.add_scalar('iter_time', elapsed, iteration)
 
-    # Report test and samples of training set
+    # 报告测试和训练集的样本
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
