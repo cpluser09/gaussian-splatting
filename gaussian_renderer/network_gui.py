@@ -15,6 +15,12 @@ import socket
 import json
 from scene.cameras import MiniCam
 
+#是一个基于Socket的网络通信模块，用于实现训练过程中的可视化和交互控制
+#主要功能有：
+#1. 与GUI建立连接
+#2. 读取GUI发送的消息
+#3. 发送消息到GUI
+
 host = "127.0.0.1"
 port = 6009
 

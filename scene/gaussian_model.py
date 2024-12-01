@@ -210,12 +210,22 @@ class GaussianModel:
                                                         lr_delay_mult=training_args.exposure_lr_delay_mult,
                                                         max_steps=training_args.iterations)
 
+    # 1. 曝光参数学习率
+    # 仅在 pretrained_exposures 为 None 时执行
+    # 使用 exposure_scheduler_args 为所有曝光参数组更新学习率
+    # 学习率值基于当前迭代次数计算
+    
+    # 2. XYZ参数学习率
+    # 在主优化器中查找名为 "xyz" 的参数组
+    # 使用 xyz_scheduler_args 计算新的学习率
+    # 更新该参数组的学习率并返回新值
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
+        # 如果没有预训练的曝光参数
         if self.pretrained_exposures is None:
             for param_group in self.exposure_optimizer.param_groups:
                 param_group['lr'] = self.exposure_scheduler_args(iteration)
-
+        # 更新主优化器中的xyz参数组的学习率
         for param_group in self.optimizer.param_groups:
             if param_group["name"] == "xyz":
                 lr = self.xyz_scheduler_args(iteration)
