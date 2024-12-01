@@ -316,6 +316,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     )
                 
                 # 在指定间隔或特定条件下重置不透明度
+                # 训练过程中透明度可能会变得过大或过小
+                # 过小：导致高斯体几乎不可见
+                # 过大：导致过度遮挡其他点
+                # 影响渲染质量和训练稳定性
                 if iteration % opt.opacity_reset_interval == 0 or (
                     dataset.white_background and iteration == opt.densify_from_iter
                 ):
@@ -323,15 +327,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # 更新优化器
             if iteration < opt.iterations:
-                gaussians.exposure_optimizer.step()
-                gaussians.exposure_optimizer.zero_grad(set_to_none = True)
-                if use_sparse_adam:
-                    visible = radii > 0
+                # 1. 更新曝光参数
+                gaussians.exposure_optimizer.step() # 应用曝光优化器的梯度更新
+                gaussians.exposure_optimizer.zero_grad(set_to_none = True) # 清除曝光梯度
+                # 2. 根据优化器类型选择不同的更新策略
+                if use_sparse_adam: # 如果使用稀疏Adam优化器
+                    visible = radii > 0 # 计算可见性掩码：只更新半径大于0的高斯体
+                    # 使用稀疏Adam更新，只更新可见的高斯体
                     gaussians.optimizer.step(visible, radii.shape[0])
+                    # 清除梯度
                     gaussians.optimizer.zero_grad(set_to_none = True)
-                else:
-                    gaussians.optimizer.step()
-                    gaussians.optimizer.zero_grad(set_to_none = True)
+                else: # 使用普通优化器
+                    gaussians.optimizer.step() # 更新所有参数
+                    gaussians.optimizer.zero_grad(set_to_none = True) # 清除梯度
+            # 在高斯训练中，梯度指导了如何调整每个高斯体的属性（位置、形状、颜色等），以更好地重建3D场景。
 
             # 保存检查点
             if iteration in checkpoint_iterations:
